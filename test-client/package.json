@@ -1,0 +1,20 @@
+{
+    "name": "credex-test-client",
+    "version": "1.0.0",
+    "description": "Test client for Credex protocol interactions",
+    "main": "agent.ts",
+    "scripts": {
+        "start": "adk run .",
+        "web": "adk web ."
+    },
+    "dependencies": {
+        "adk-typescript": "1.0.3",
+        "dotenv": "^16.4.5",
+        "ethers": "^6.13.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.12.7",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.4.5"
+    }
+}
