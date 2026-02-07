@@ -73,43 +73,56 @@ const state: ClientState = {};
 function extractParam(params: any, key: string): string | null {
   if (!params) return null;
 
-  // 1. If params is a string (could be a direct value or a JSON string)
+  // 1. If params is an object (direct from LLM or canonical ADK)
+  if (typeof params === "object" && params !== null) {
+    if (params[key] !== undefined && params[key] !== null) {
+      return String(params[key]);
+    }
+    if (params.params) {
+      return extractParam(params.params, key);
+    }
+    return null;
+  }
+
+  // 2. If params is a string
   if (typeof params === "string") {
     const trimmed = params.trim();
+
+    // a. Try JSON/Python dict parsing
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
-        // Convert Python-style single quotes to JSON double quotes
         const jsonStr = trimmed.replace(/'/g, '"');
         const parsed = JSON.parse(jsonStr);
         if (parsed[key] !== undefined && parsed[key] !== null) {
           return String(parsed[key]);
         }
-        // If it was valid JSON but didn't have the key, we should NOT return the whole string
-        return null;
+        return null; // Valid JSON but missing key
       } catch (e) {
-        // If parsing fails, try regex extraction as fallback
-        const regex = new RegExp(`['"]${key}['"]\\s*:\\s*['"]([^'"]+)['"]`);
-        const match = trimmed.match(regex);
-        if (match) {
-          return match[1];
-        }
+        // Fall through to other strategies
       }
     }
-    // Return the raw string if it doesn't look like a dict or parsing/search failed
+
+    // b. Try Key-Value pair extraction (e.g. "amount=10, token=USDC")
+    const regex = new RegExp(
+      `(?:^|[,;\\s]|\\W)${key}\\s*[=:]\\s*['"]?([^'"]+?)(?:['"]?|[,;\\s]|$)`,
+      "i",
+    );
+    const match = trimmed.match(regex);
+    if (match) {
+      return match[1].trim();
+    }
+
+    // c. Safety Fallback: If it looks like structured data (has = or :) but we didn't find the key,
+    // return null to allow sequential key lookups.
+    if (
+      trimmed.includes("=") ||
+      (trimmed.includes(":") && !trimmed.startsWith("0x"))
+    ) {
+      return null;
+    }
+
+    // d. Literal Fallback
     return trimmed;
-  }
-
-  // 2. If params is an object
-  if (typeof params === "object") {
-    // Direct match
-    if (params[key] !== undefined && params[key] !== null) {
-      return String(params[key]);
-    }
-
-    // Wrapped in "params" field (canonical ADK pattern)
-    if (params.params) {
-      return extractParam(params.params, key);
-    }
   }
 
   return null;
