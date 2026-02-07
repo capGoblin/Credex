@@ -17,7 +17,7 @@ import { getReputationReader, ERC8004ReputationReader } from "./reputation";
 import { CredexConfig, AgentRecord, CredexResponse } from "./types";
 
 // Credit limit constants (from PRD)
-const INITIAL_LIMIT_BASE = 50_000n; // 0.05 USDC base
+const INITIAL_LIMIT_BASE = 5_000_000n; // 5 USDC base
 const GROWTH_FACTOR_BP = 110; // 1.1x (110%)
 const MAX_LIMIT = 10_000n * 1_000_000n; // 10,000 USDC cap
 
@@ -101,6 +101,7 @@ export class CredexClearing {
         address: agentAddress,
         agentId,
         debt: 0n,
+        principal: 0n,
         creditLimit: initialLimit,
         lastAccrued: Date.now() / 1000,
         lastRepayment: Date.now() / 1000,
@@ -147,7 +148,7 @@ export class CredexClearing {
       }
 
       // Check limit
-      const available = agent.creditLimit - agent.debt;
+      const available = agent.creditLimit - agent.principal;
       if (amountWei > available) {
         return {
           success: false,
@@ -166,8 +167,12 @@ export class CredexClearing {
         message: `Borrowed ${amount} USDC`,
         data: {
           debt: ethers.formatUnits(updated.debt, 6),
+          principal: ethers.formatUnits(updated.principal, 6),
           creditLimit: ethers.formatUnits(updated.creditLimit, 6),
-          available: ethers.formatUnits(updated.creditLimit - updated.debt, 6),
+          available: ethers.formatUnits(
+            updated.creditLimit - updated.principal,
+            6,
+          ),
         },
       };
     } catch (error) {
@@ -217,8 +222,12 @@ export class CredexClearing {
         message: `Repaid ${amount} USDC`,
         data: {
           debt: ethers.formatUnits(updated.debt, 6),
+          principal: ethers.formatUnits(updated.principal, 6),
           creditLimit: ethers.formatUnits(updated.creditLimit, 6),
-          available: ethers.formatUnits(updated.creditLimit - updated.debt, 6),
+          available: ethers.formatUnits(
+            updated.creditLimit - updated.principal,
+            6,
+          ),
         },
       };
     } catch (error) {
@@ -242,8 +251,9 @@ export class CredexClearing {
         data: {
           address: agentAddress,
           debt: ethers.formatUnits(agent.debt, 6),
+          principal: ethers.formatUnits(agent.principal, 6),
           creditLimit: ethers.formatUnits(agent.creditLimit, 6),
-          available: ethers.formatUnits(agent.creditLimit - agent.debt, 6),
+          available: ethers.formatUnits(agent.creditLimit - agent.principal, 6),
           frozen: agent.frozen,
           lastRepayment: new Date(
             Number(agent.lastRepayment) * 1000,
@@ -264,11 +274,20 @@ export class CredexClearing {
   async getPoolStatus(): Promise<CredexResponse> {
     try {
       const liquidity = await this.poolClient.getTotalLiquidity();
+      const assets = await this.poolClient.getTotalAssets();
+      const shares = await this.poolClient.getTotalShares();
+
+      const sharePrice =
+        shares > 0n ? (assets * 10n ** 18n) / shares : 10n ** 18n;
+
       return {
         success: true,
         data: {
           poolAddress: this.config.poolAddress,
           totalLiquidity: ethers.formatUnits(liquidity, 6),
+          totalAssets: ethers.formatUnits(assets, 6),
+          totalShares: ethers.formatUnits(shares, 6),
+          exchangeRate: ethers.formatUnits(sharePrice, 18), // 1.00 means 1:1 par
           agentWallet: this.signer.address,
         },
       };

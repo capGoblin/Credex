@@ -11,11 +11,13 @@ import { AgentOnChain } from "./types";
 // CredexPool ABI (only the functions we need)
 const CREDEX_POOL_ABI = [
   // Read functions
-  "function agents(address) view returns (uint256 debt, uint256 creditLimit, uint256 lastAccrued, uint256 lastRepayment, bool frozen, bool active)",
-  "function getAgentState(address agent) view returns (uint256 debt, uint256 creditLimit, uint256 lastAccrued, uint256 lastRepayment, bool frozen, bool active)",
+  "function agents(address) view returns (uint256 debt, uint256 principal, uint256 creditLimit, uint256 lastAccrued, uint256 lastRepayment, bool frozen, bool active)",
+  "function getAgentState(address agent) view returns (uint256 debt, uint256 principal, uint256 creditLimit, uint256 lastAccrued, uint256 lastRepayment, bool frozen, bool active)",
   "function availableCredit(address agent) view returns (uint256)",
   "function totalLiquidity() view returns (uint256)",
-  "function lpBalances(address) view returns (uint256)",
+  "function totalAssets() view returns (uint256)",
+  "function totalShares() view returns (uint256)",
+  "function lpShares(address) view returns (uint256)",
 
   // Write functions (onlyAgent)
   "function onboardAgent(address agent, uint256 creditLimit) external",
@@ -49,11 +51,12 @@ export class PoolClient {
     const result = await this.contract.getAgentState(agentAddress);
     return {
       debt: result[0],
-      creditLimit: result[1],
-      lastAccrued: result[2],
-      lastRepayment: result[3],
-      frozen: result[4],
-      active: result[5],
+      principal: result[1],
+      creditLimit: result[2],
+      lastAccrued: result[3],
+      lastRepayment: result[4],
+      frozen: result[5],
+      active: result[6],
     };
   }
 
@@ -62,9 +65,19 @@ export class PoolClient {
     return await this.contract.availableCredit(agentAddress);
   }
 
-  // Get total pool liquidity
+  // Get total pool liquidity (Cash)
   async getTotalLiquidity(): Promise<bigint> {
     return await this.contract.totalLiquidity();
+  }
+
+  // Get total assets (Cash + Debt)
+  async getTotalAssets(): Promise<bigint> {
+    return await this.contract.totalAssets();
+  }
+
+  // Get total shares
+  async getTotalShares(): Promise<bigint> {
+    return await this.contract.totalShares();
   }
 
   // Onboard a new agent with initial credit limit

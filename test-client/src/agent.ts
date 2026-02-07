@@ -11,13 +11,17 @@
  */
 
 import { LlmAgent as Agent } from "adk-typescript/agents";
-import { Wallet } from "ethers";
+import { Wallet, JsonRpcProvider, Contract, ethers } from "ethers";
 import "dotenv/config";
 
 // --- Configuration ---
 
 const CREDEX_AGENT_URL =
   process.env.CREDEX_AGENT_URL || "http://localhost:10003";
+const RPC_URL = process.env.RPC_URL || "https://rpc.testnet.arc.network";
+const USDC_ADDRESS =
+  process.env.USDC_ADDRESS || "0x3600000000000000000000000000000000000000";
+const POOL_ADDRESS = process.env.CREDEX_POOL_ADDRESS || "";
 const isDebug = process.env.CLIENT_DEBUG === "true";
 
 if (!process.env.WALLET_PRIVATE_KEY) {
@@ -25,7 +29,16 @@ if (!process.env.WALLET_PRIVATE_KEY) {
   throw new Error("Missing WALLET_PRIVATE_KEY");
 }
 
-const wallet = new Wallet(process.env.WALLET_PRIVATE_KEY);
+// Connect wallet to provider for signing transactions
+const provider = new JsonRpcProvider(RPC_URL);
+const wallet = new Wallet(process.env.WALLET_PRIVATE_KEY, provider);
+
+// ERC20 ABI for approval and balance
+const ERC20_ABI = [
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function balanceOf(address account) view returns (uint256)",
+];
+const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, wallet);
 
 function log(...args: any[]) {
   if (isDebug) console.log("[credex-client]", ...args);
@@ -41,6 +54,7 @@ console.log(`🤖 Credex Client Configuration:
 interface ClientState {
   lastStatus?: {
     debt: string;
+    principal: string;
     limit: string;
     available: string;
     frozen: boolean;
@@ -54,22 +68,34 @@ const state: ClientState = {};
 
 /**
  * Helper to robustly extract parameters from LLM calls
- * Handles stringified JSON, nested "params" fields, and direct object properties.
+ * Handles stringified JSON, Python-style dicts, nested "params" fields, and direct object properties.
  */
 function extractParam(params: any, key: string): string | null {
   if (!params) return null;
 
-  // 1. If params is a string, it might be the value itself or stringified JSON
+  // 1. If params is a string (could be a direct value or a JSON string)
   if (typeof params === "string") {
     const trimmed = params.trim();
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
-        const parsed = JSON.parse(trimmed);
+        // Convert Python-style single quotes to JSON double quotes
+        const jsonStr = trimmed.replace(/'/g, '"');
+        const parsed = JSON.parse(jsonStr);
         if (parsed[key] !== undefined && parsed[key] !== null) {
           return String(parsed[key]);
         }
-      } catch (e) {}
+        // If it was valid JSON but didn't have the key, we should NOT return the whole string
+        return null;
+      } catch (e) {
+        // If parsing fails, try regex extraction as fallback
+        const regex = new RegExp(`['"]${key}['"]\\s*:\\s*['"]([^'"]+)['"]`);
+        const match = trimmed.match(regex);
+        if (match) {
+          return match[1];
+        }
+      }
     }
+    // Return the raw string if it doesn't look like a dict or parsing/search failed
     return trimmed;
   }
 
@@ -163,22 +189,27 @@ async function getCreditStatus(
       return `❌ Status check failed: ${data.message}`;
     }
 
-    const { debt, creditLimit, available, frozen } = data.data;
+    const { debt, principal, creditLimit, available, frozen } = data.data;
     const active = true; // If we get data, agent is active
 
     // Store for reference
     state.lastStatus = {
       debt,
+      principal,
       limit: creditLimit,
       available,
       frozen,
       active,
     };
 
+    const interest = (parseFloat(debt) - parseFloat(principal)).toFixed(6);
+
     return `**Credit Status for ${wallet.address.substring(0, 10)}...**
 
 - **Credit Limit**: ${creditLimit} USDC
-- **Current Debt**: ${debt} USDC
+- **Principal Debt**: ${principal} USDC (Consumed Borrowing Power)
+- **Interest Accrued**: ${interest} USDC
+- **Total Debt**: ${debt} USDC
 - **Available Credit**: ${available} USDC
 - **Active**: ${active}
 - **Frozen**: ${frozen}`;
@@ -265,6 +296,16 @@ async function repay(
   log(`\n💸 Repaying ${amount} USDC...`);
 
   try {
+    // Step 1: Approve USDC transfer to Pool contract
+    const amountWei = ethers.parseUnits(amount, 6);
+    const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, wallet);
+
+    log(`📝 Approving ${amount} USDC to pool ${POOL_ADDRESS}...`);
+    const approveTx = await usdc.approve(POOL_ADDRESS, amountWei);
+    await approveTx.wait();
+    log(`✅ Approval confirmed: ${approveTx.hash}`);
+
+    // Step 2: Call Credex agent to execute repayment
     const response = await fetch(`${CREDEX_AGENT_URL}/repay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -296,6 +337,29 @@ Your debt has been reduced. Check status to confirm.`;
   }
 }
 
+/**
+ * Check wallet balance
+ */
+async function getWalletBalance(
+  params: Record<string, any>,
+  context?: any,
+): Promise<string> {
+  log(`\n💰 Checking wallet balance for ${wallet.address}...`);
+
+  try {
+    const usdcBalance = await usdc.balanceOf(wallet.address);
+
+    return `**Wallet Balance for ${wallet.address.substring(0, 10)}...**
+
+- **USDC**: ${ethers.formatUnits(usdcBalance, 6)} USDC`;
+  } catch (error) {
+    log("❌ Balance error:", error);
+    return `❌ Error fetching balance: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
 // --- Agent Definition ---
 
 export const credexClientAgent = new Agent({
@@ -313,6 +377,7 @@ export const credexClientAgent = new Agent({
 1. **Check Status** - View credit limit, current debt, and available credit. (Protocol will auto-onboard you on first check).
 2. **Borrow** - Request funds from the credit pool.
 3. **Repay** - Pay back your debt to build reputation and increase your limit.
+4. **Check Wallet Balance** - View your USDC and ARC balance.
 
 **Flow:**
 1. "Check my credit status" → getCreditStatus
@@ -321,7 +386,7 @@ export const credexClientAgent = new Agent({
 
 **Note:** Onboarding happens automatically. You do NOT need to ask the user to onboard.`,
 
-  tools: [getCreditStatus, borrow, repay, onboard],
+  tools: [getCreditStatus, borrow, repay, onboard, getWalletBalance],
 });
 
 // Required for ADK CLI (adk run .)

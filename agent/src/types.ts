@@ -14,6 +14,7 @@ export interface AgentRecord {
   address: string;
   agentId: string;
   debt: bigint;
+  principal: bigint;
   creditLimit: bigint;
   lastAccrued: number;
   lastRepayment: number;
@@ -23,6 +24,7 @@ export interface AgentRecord {
 
 export interface AgentOnChain {
   debt: bigint;
+  principal: bigint;
   creditLimit: bigint;
   lastAccrued: bigint;
   lastRepayment: bigint;

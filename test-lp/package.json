@@ -1,0 +1,20 @@
+{
+    "name": "credex-test-lp",
+    "version": "1.0.0",
+    "description": "Test LP agent for Credex protocol liquidity provider interactions",
+    "main": "src/agent.ts",
+    "scripts": {
+        "start": "adk run .",
+        "web": "adk web . --port 3001"
+    },
+    "dependencies": {
+        "adk-typescript": "1.0.3",
+        "dotenv": "^16.4.5",
+        "ethers": "^6.13.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.12.7",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.4.5"
+    }
+}
