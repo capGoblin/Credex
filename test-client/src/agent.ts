@@ -13,6 +13,9 @@
 import { LlmAgent as Agent } from "adk-typescript/agents";
 import { Wallet, JsonRpcProvider, Contract, ethers } from "ethers";
 import "dotenv/config";
+import { BridgeKit } from "@circle-fin/bridge-kit";
+import { createViemAdapterFromPrivateKey } from "@circle-fin/adapter-viem-v2";
+import { inspect } from "util";
 
 // --- Configuration ---
 
@@ -23,6 +26,10 @@ const USDC_ADDRESS =
   process.env.USDC_ADDRESS || "0x3600000000000000000000000000000000000000";
 const POOL_ADDRESS = process.env.CREDEX_POOL_ADDRESS || "";
 const isDebug = process.env.CLIENT_DEBUG === "true";
+
+// Base Sepolia Configuration for cross-chain balance checks
+const BASE_RPC_URL = "https://sepolia.base.org";
+const BASE_USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 
 if (!process.env.WALLET_PRIVATE_KEY) {
   console.error("❌ WALLET_PRIVATE_KEY required in .env");
@@ -102,9 +109,10 @@ function extractParam(params: any, key: string): string | null {
       }
     }
 
-    // b. Try Key-Value pair extraction (e.g. "amount=10, token=USDC")
+    // b. Try Key-Value pair extraction (e.g. "amount=10&token=USDC" or "amount=10, token=USDC")
+    // Greedy match that stops at common separators
     const regex = new RegExp(
-      `(?:^|[,;\\s]|\\W)${key}\\s*[=:]\\s*['"]?([^'"]+?)(?:['"]?|[,;\\s]|$)`,
+      `(?:^|[&,;\\s]|\\W)${key}\\s*[=:]\\s*['"]?([^'\"&,;\\s]+)`,
       "i",
     );
     const match = trimmed.match(regex);
@@ -121,7 +129,7 @@ function extractParam(params: any, key: string): string | null {
       return null;
     }
 
-    // d. Literal Fallback
+    // d. Literal Fallback (e.g. just "10")
     return trimmed;
   }
 
@@ -351,23 +359,101 @@ Your debt has been reduced. Check status to confirm.`;
 }
 
 /**
- * Check wallet balance
+ * Bridge USDC between Arc and Base
+ * @param params.amount Amount of USDC to bridge
+ * @param params.fromChain Source chain: "Arc" or "Base"
+ * @param params.toChain Destination chain: "Arc" or "Base"
+ */
+async function bridgeUSDC(
+  params: Record<string, any>,
+  context?: any,
+): Promise<string> {
+  log(`[DEBUG] bridgeUSDC called with params: ${JSON.stringify(params)}`);
+  let amount = extractParam(params, "amount");
+  const fromChainParam = extractParam(params, "fromChain");
+  const toChainParam = extractParam(params, "toChain");
+
+  if (amount) {
+    amount = amount.replace(/USDC/i, "").trim();
+  }
+
+  if (!amount || !fromChainParam || !toChainParam) {
+    return `❌ Missing required parameters. You must specify amount, fromChain, and toChain.
+Example: "bridge 0.5 USDC from Arc to Base"`;
+  }
+
+  log(
+    `\n🌉 Bridging ${amount} USDC from ${fromChainParam} to ${toChainParam}...`,
+  );
+
+  try {
+    const kit = new BridgeKit();
+    const adapter = createViemAdapterFromPrivateKey({
+      privateKey: process.env.WALLET_PRIVATE_KEY as `0x${string}`,
+    });
+
+    const fromChain = fromChainParam.toLowerCase().includes("base")
+      ? "Base_Sepolia"
+      : "Arc_Testnet";
+    const toChain = toChainParam.toLowerCase().includes("base")
+      ? "Base_Sepolia"
+      : "Arc_Testnet";
+
+    if (fromChain === toChain) {
+      return `❌ Source and destination chains must be different (Arc <-> Base).`;
+    }
+
+    const bridgeResult = await kit.bridge({
+      from: { adapter, chain: fromChain },
+      to: { adapter, chain: toChain },
+      amount: amount,
+    });
+
+    log("✅ Bridge successful:", bridgeResult);
+
+    return `✅ **Bridge Initiated!**
+    
+- **Amount**: ${amount} USDC
+- **From**: ${fromChain}
+- **To**: ${toChain}
+- **Result**: ${inspect(bridgeResult, false, 1, true)}
+
+The funds will arrive on the destination chain shortly.`;
+  } catch (error) {
+    log("❌ bridgeUSDC error:", error);
+    return `❌ Error bridging USDC: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
+/**
+ * Check wallet balance on both Arc and Base chains
  */
 async function getWalletBalance(
   params: Record<string, any>,
   context?: any,
 ): Promise<string> {
-  log(`\n💰 Checking wallet balance for ${wallet.address}...`);
+  log(`\n💰 Checking cross-chain wallet balances for ${wallet.address}...`);
 
   try {
-    const usdcBalance = await usdc.balanceOf(wallet.address);
+    // 1. Check Arc Balance (Current provider)
+    const arcBalance = await usdc.balanceOf(wallet.address);
 
-    return `**Wallet Balance for ${wallet.address.substring(0, 10)}...**
+    // 2. Check Base Balance
+    const baseProvider = new JsonRpcProvider(BASE_RPC_URL);
+    const baseUsdc = new Contract(BASE_USDC_ADDRESS, ERC20_ABI, baseProvider);
+    const baseBalance = await baseUsdc.balanceOf(wallet.address);
 
-- **USDC**: ${ethers.formatUnits(usdcBalance, 6)} USDC`;
+    return `**Wallet Balances for ${wallet.address.substring(0, 10)}...**
+
+- **Arc Network (Native)**: ${ethers.formatUnits(arcBalance, 6)} USDC
+- **Base Sepolia**: ${ethers.formatUnits(baseBalance, 6)} USDC
+
+*Total Liquidity: ${(parseFloat(ethers.formatUnits(arcBalance, 6)) + parseFloat(ethers.formatUnits(baseBalance, 6))).toFixed(2)} USDC*`;
   } catch (error) {
     log("❌ Balance error:", error);
-    return `❌ Error fetching balance: ${
+    return `❌ Error fetching cross-chain balances: ${
       error instanceof Error ? error.message : String(error)
     }`;
   }
@@ -388,18 +474,29 @@ export const credexClientAgent = new Agent({
 
 **Capabilities:**
 1. **Check Status** - View credit limit, current debt, and available credit. (Protocol will auto-onboard you on first check).
-2. **Borrow** - Request funds from the credit pool.
-3. **Repay** - Pay back your debt to build reputation and increase your limit.
-4. **Check Wallet Balance** - View your USDC and ARC balance.
+2. **Borrow** - Request funds from the credit pool on Arc.
+3. **Bridge USDC** - Move USDC between your Arc and Base wallets. **MANDATORY**: You MUST ask the user to confirm the source and destination chains before using this tool. NEVER assume.
+4. **Repay** - Pay back your debt to build reputation and increase your limit.
+5. **Check Wallet Balance** - View your USDC balance on both Arc and Base chains.
 
-**Flow:**
-1. "Check my credit status" → getCreditStatus
-2. "Borrow 0.5 USDC" → borrow
-3. "Repay 0.5 USDC" → repay
+**Strict Rules:**
+- **NO ASSUMPTIONS**: Never assume which chain the user has funds on. Always ask for confirmation before bridging.
+- **Explicit Confirmation**: If a user says "Bridge 1 USDC", respond with: "Certainly, from which chain (Arc or Base) would you like to move those funds, and where to?"
+
+**Flows:**
+- **Borrow to Base**: Use 'borrow' on Arc, then ask the user "Would you like to bridge this borrow to Base?", then use 'bridgeUSDC' (from Arc, to Base).
+- **Repay from Base**: Ask user if they have funds on Base, if confirmed use 'bridgeUSDC' (from Base, to Arc), then call 'repay'.
 
 **Note:** Onboarding happens automatically. You do NOT need to ask the user to onboard.`,
 
-  tools: [getCreditStatus, borrow, repay, onboard, getWalletBalance],
+  tools: [
+    getCreditStatus,
+    borrow,
+    bridgeUSDC,
+    repay,
+    onboard,
+    getWalletBalance,
+  ],
 });
 
 // Required for ADK CLI (adk run .)
