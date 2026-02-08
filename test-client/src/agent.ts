@@ -228,12 +228,16 @@ async function getCreditStatus(
     return `**Credit Status for ${wallet.address.substring(0, 10)}...**
 
 - **Credit Limit**: ${creditLimit} USDC
-- **Principal Debt**: ${principal} USDC (Consumed Borrowing Power)
+- **Principal Debt**: ${principal} USDC (Borrowed Capital)
 - **Interest Accrued**: ${interest} USDC
-- **Total Debt**: ${debt} USDC
+- **Total Debt**: ${debt} USDC (Principal + Interest)
 - **Available Credit**: ${available} USDC
-- **Active**: ${active}
-- **Frozen**: ${frozen}`;
+
+---
+**Protocol Logic (Simple Math):**
+- Your **Available Credit** is exactly \`Limit - Principal\`. 
+- Interest stays in your **Total Debt** but does not reduce your borrowing power until it is either paid or the account is frozen.
+- Repayments pay off **Interest first**, then **Principal**. To restore borrowing power, you must pay down the principal.`;
   } catch (error) {
     log("❌ Status error:", error);
     return `❌ Error fetching status: ${
@@ -297,7 +301,7 @@ Use "check my status" to see updated balance.`;
 
 /**
  * Repay debt to the pool
- * @param params.amount Amount to repay
+ * @param params.amount Amount to repay (USDC amount or "all" to clear debt)
  */
 async function repay(
   params: Record<string, any>,
@@ -311,17 +315,45 @@ async function repay(
   }
 
   if (!amount) {
-    return `❌ Amount required. Example: "repay 0.5 USDC"`;
+    return `❌ Amount required. Example: "repay 0.5 USDC" or "repay all"`;
   }
 
   log(`\n💸 Repaying ${amount} USDC...`);
 
   try {
-    // Step 1: Approve USDC transfer to Pool contract
-    const amountWei = ethers.parseUnits(amount, 6);
     const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, wallet);
+    let amountToRepay: string;
 
-    log(`📝 Approving ${amount} USDC to pool ${POOL_ADDRESS}...`);
+    // Handle "all" / "full" / "max" by providing a buffer to clear interest accrual
+    if (
+      amount.toLowerCase().includes("all") ||
+      amount.toLowerCase().includes("full") ||
+      amount.toLowerCase().includes("max")
+    ) {
+      log("   Full repayment requested. Calculating debt with buffer...");
+      const statusRes = await fetch(
+        `${CREDEX_AGENT_URL}/status/${wallet.address}`,
+      );
+      const statusData = (await statusRes.json()) as any;
+
+      if (!statusData.success) {
+        return `❌ Could not fetch debt for full repayment: ${statusData.message}`;
+      }
+
+      // Add 1% buffer to ensure interest accrued during TX is covered.
+      // The contract will cap it and only take what is owed.
+      const debt = parseFloat(statusData.data.debt);
+      amountToRepay = (debt * 1.01).toFixed(6);
+      log(
+        `   Targeting repayment of ${amountToRepay} USDC to clear ${debt} USDC debt.`,
+      );
+    } else {
+      amountToRepay = amount;
+    }
+
+    const amountWei = ethers.parseUnits(amountToRepay, 6);
+
+    log(`📝 Approving ${amountToRepay} USDC to pool ${POOL_ADDRESS}...`);
     const approveTx = await usdc.approve(POOL_ADDRESS, amountWei);
     await approveTx.wait();
     log(`✅ Approval confirmed: ${approveTx.hash}`);
@@ -332,7 +364,7 @@ async function repay(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agentAddress: wallet.address,
-        amount: String(amount),
+        amount: String(amountToRepay),
       }),
     });
 
@@ -341,12 +373,13 @@ async function repay(
     if (result.success) {
       log("✅ Repay successful:", result);
       return `✅ **Repayment Successful!**
-
-- Amount: ${amount} USDC
+      
+- Repaid: ${amountToRepay} USDC (max cap applied)
 - Message: ${result.message}
 ${result.txHash ? `- TX: ${result.txHash}` : ""}
 
-Your debt has been reduced. Check status to confirm.`;
+Your debt has been cleared or reduced. Interest is accrued every 1 minute.
+Check status to confirm current balance.`;
     } else {
       return `❌ Repay Failed: ${result.message}`;
     }
@@ -476,7 +509,7 @@ export const credexClientAgent = new Agent({
 1. **Check Status** - View credit limit, current debt, and available credit. (Protocol will auto-onboard you on first check).
 2. **Borrow** - Request funds from the credit pool on Arc.
 3. **Bridge USDC** - Move USDC between your Arc and Base wallets. **MANDATORY**: You MUST ask the user to confirm the source and destination chains before using this tool. NEVER assume.
-4. **Repay** - Pay back your debt to build reputation and increase your limit.
+4. **Repay** - Pay back your debt to build reputation and increase your limit. **NOTE**: You can accept "all" or "full" as an amount to repay the entire debt.
 5. **Check Wallet Balance** - View your USDC balance on both Arc and Base chains.
 
 **Strict Rules:**
